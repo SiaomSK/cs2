@@ -278,10 +278,12 @@ export class CS2Engine {
   private mouseDownLeft = false;
   private semiFiredThisPress = false;
   private pointerLocked = false;
+  private ignoreNextLockSpike = false;
   private justLockedAt = 0;
   private dragAiming = false;
-  private lastMouseX = 0;
-  private lastMouseY = 0;
+  private uiModalOpen = false;
+  private lastMouseX: number | null = null;
+  private lastMouseY: number | null = null;
   private attackTokenCount = 0;
 
   constructor(container: HTMLElement, onHudUpdate: (snap: HudSnapshot) => void) {
@@ -1056,10 +1058,16 @@ export class CS2Engine {
 
     this.spawnBots();
     this.gamePhase = 'playing';
+    this.uiModalOpen = false;
     this.keys.clear();
     this.mouseDownLeft = false;
+    this.dragAiming = false;
+    this.lastMouseX = null;
+    this.lastMouseY = null;
     this.syncBodyState();
+    this.syncCursorStyle();
     this.pushHud(true);
+    this.requestPointerLock();
 
     // Clear focus from title button so Space/Enter don't re-trigger UI
     if (document.activeElement instanceof HTMLElement) {
@@ -1077,35 +1085,66 @@ export class CS2Engine {
     this.sensitivity = val;
   }
 
+  public setUiOpen(open: boolean): void {
+    this.uiModalOpen = open;
+    this.keys.clear();
+    this.mouseDownLeft = false;
+    this.dragAiming = false;
+    this.lastMouseX = null;
+    this.lastMouseY = null;
+    this.syncCursorStyle();
+  }
+
+  private syncCursorStyle(): void {
+    this.renderer.domElement.style.cursor =
+      this.gamePhase === 'playing' && !this.uiModalOpen ? 'crosshair' : 'default';
+  }
+
   public setPaused(paused: boolean): void {
     if (this.gamePhase === 'title' || this.gamePhase === 'gameover') return;
     this.gamePhase = paused ? 'paused' : 'playing';
+    this.keys.clear();
+    this.mouseDownLeft = false;
+    this.dragAiming = false;
+    this.lastMouseX = null;
+    this.lastMouseY = null;
     if (paused) {
-      this.keys.clear();
-      this.mouseDownLeft = false;
       if (document.pointerLockElement) {
         document.exitPointerLock?.();
       }
+    } else if (!this.uiModalOpen) {
+      this.requestPointerLock();
     }
     this.syncBodyState();
+    this.syncCursorStyle();
     this.pushHud(true);
   }
 
   public returnToTitle(): void {
     this.gamePhase = 'title';
+    this.uiModalOpen = false;
     this.keys.clear();
     this.mouseDownLeft = false;
+    this.dragAiming = false;
+    this.lastMouseX = null;
+    this.lastMouseY = null;
     if (document.pointerLockElement) {
       document.exitPointerLock?.();
     }
     this.syncBodyState();
+    this.syncCursorStyle();
     this.pushHud(true);
   }
 
   public requestPointerLock(): void {
-    if (this.gamePhase === 'playing' && !this.pointerLocked) {
+    if (this.gamePhase === 'playing' && !this.pointerLocked && !this.uiModalOpen) {
       try {
-        this.renderer.domElement.requestPointerLock?.();
+        const res = this.renderer.domElement.requestPointerLock?.() as unknown as Promise<void> | undefined;
+        if (res && typeof res.catch === 'function') {
+          res.catch(() => {
+            // Ignore sandbox/headless pointer lock rejections
+          });
+        }
       } catch {
         // Ignore in headless/sandbox environments
       }
@@ -1238,8 +1277,8 @@ export class CS2Engine {
       const kickY = (Math.random() - 0.5) * spec.recoilKickYaw * 2;
       this.playerPitch = Math.max(-1.45, Math.min(1.45, this.playerPitch + kickP));
       this.playerYaw += kickY;
-      this.recoilRecoveryPitch += kickP;
-      this.recoilRecoveryYaw += kickY;
+      this.recoilRecoveryPitch = Math.min(0.18, this.recoilRecoveryPitch + kickP);
+      this.recoilRecoveryYaw = Math.max(-0.12, Math.min(0.12, this.recoilRecoveryYaw + kickY));
       this.trauma = Math.min(0.45, this.trauma + (wid === 'awp' ? 0.35 : 0.09));
     }
 
@@ -2511,28 +2550,54 @@ export class CS2Engine {
     this.keys.delete(e.code);
   };
 
+  private applyLookDelta(dx: number, dy: number, sens: number): void {
+    this.playerYaw -= dx * sens;
+    this.playerPitch = Math.max(-1.45, Math.min(1.45, this.playerPitch - dy * sens));
+    if (dy > 0 && this.recoilRecoveryPitch > 0) {
+      this.recoilRecoveryPitch = Math.max(0, this.recoilRecoveryPitch - dy * sens);
+    }
+  }
+
   private onMouseMove = (e: MouseEvent): void => {
-    if (this.gamePhase !== 'playing' || this.playerHp <= 0) return;
+    if (this.gamePhase !== 'playing' || this.playerHp <= 0 || this.uiModalOpen) return;
     if (this.pointerLocked) {
-      if (performance.now() - this.justLockedAt < 80) return;
-      if (Math.abs(e.movementX) > 220 || Math.abs(e.movementY) > 220) return;
+      const mx = e.movementX ?? 0;
+      const my = e.movementY ?? 0;
+      if (mx === 0 && my === 0) return;
+      if (this.ignoreNextLockSpike) {
+        this.ignoreNextLockSpike = false;
+        if (Math.abs(mx) > 60 || Math.abs(my) > 60) return;
+      }
+      // Reject Chromium/browser pointer-lock recenter warp spikes (e.g. mx === -clientX or huge jumps)
+      if (Math.abs(mx) > 220 || Math.abs(my) > 220) return;
+      if (Math.abs(mx + e.clientX) <= 2 && Math.abs(my + e.clientY) <= 2 && (Math.abs(mx) > 25 || Math.abs(my) > 25)) {
+        return;
+      }
       const sens = this.isScoped ? this.sensitivity * 0.45 : this.sensitivity;
-      this.playerYaw -= e.movementX * sens;
-      this.playerPitch = Math.max(-1.45, Math.min(1.45, this.playerPitch - e.movementY * sens));
-    } else if (this.dragAiming) {
+      this.applyLookDelta(mx, my, sens);
+    } else {
+      if (!this.dragAiming && e.target !== this.renderer.domElement) {
+        this.lastMouseX = null;
+        this.lastMouseY = null;
+        return;
+      }
+      if (this.lastMouseX === null || this.lastMouseY === null) {
+        this.lastMouseX = e.clientX;
+        this.lastMouseY = e.clientY;
+        return;
+      }
       const dx = e.clientX - this.lastMouseX;
       const dy = e.clientY - this.lastMouseY;
       this.lastMouseX = e.clientX;
       this.lastMouseY = e.clientY;
-      if (Math.abs(dx) > 180 || Math.abs(dy) > 180) return;
-      const sens = this.sensitivity * 1.4;
-      this.playerYaw -= dx * sens;
-      this.playerPitch = Math.max(-1.45, Math.min(1.45, this.playerPitch - dy * sens));
+      if (Math.abs(dx) > 260 || Math.abs(dy) > 260) return;
+      const sens = this.isScoped ? this.sensitivity * 0.65 : this.sensitivity * 1.45;
+      this.applyLookDelta(dx, dy, sens);
     }
   };
 
   private onMouseDown = (e: MouseEvent): void => {
-    if (this.gamePhase !== 'playing') return;
+    if (this.gamePhase !== 'playing' || this.uiModalOpen) return;
     if (e.target !== this.renderer.domElement) return;
     tacticalAudio.unlock();
 
@@ -2563,6 +2628,13 @@ export class CS2Engine {
     }
   };
 
+  private onCanvasMouseLeave = (): void => {
+    if (!this.pointerLocked && !this.dragAiming) {
+      this.lastMouseX = null;
+      this.lastMouseY = null;
+    }
+  };
+
   private onContextMenu = (e: MouseEvent): void => {
     if (this.gamePhase === 'playing') e.preventDefault();
   };
@@ -2571,7 +2643,19 @@ export class CS2Engine {
     this.pointerLocked = document.pointerLockElement === this.renderer.domElement;
     if (this.pointerLocked) {
       this.justLockedAt = performance.now();
+      this.ignoreNextLockSpike = true;
+      this.dragAiming = false;
+    } else {
+      this.lastMouseX = null;
+      this.lastMouseY = null;
     }
+    this.pushHud(true);
+  };
+
+  private onPointerLockError = (): void => {
+    this.pointerLocked = false;
+    this.lastMouseX = null;
+    this.lastMouseY = null;
     this.pushHud(true);
   };
 
@@ -2579,6 +2663,8 @@ export class CS2Engine {
     this.keys.clear();
     this.mouseDownLeft = false;
     this.dragAiming = false;
+    this.lastMouseX = null;
+    this.lastMouseY = null;
   };
 
   private onResize = (): void => {
@@ -2598,7 +2684,9 @@ export class CS2Engine {
     window.addEventListener('contextmenu', this.onContextMenu);
     window.addEventListener('blur', this.onBlur);
     window.addEventListener('resize', this.onResize);
+    this.renderer.domElement.addEventListener('mouseleave', this.onCanvasMouseLeave);
     document.addEventListener('pointerlockchange', this.onPointerLockChange);
+    document.addEventListener('pointerlockerror', this.onPointerLockError);
   }
 
   public dispose(): void {
@@ -2614,7 +2702,9 @@ export class CS2Engine {
     window.removeEventListener('contextmenu', this.onContextMenu);
     window.removeEventListener('blur', this.onBlur);
     window.removeEventListener('resize', this.onResize);
+    this.renderer.domElement.removeEventListener('mouseleave', this.onCanvasMouseLeave);
     document.removeEventListener('pointerlockchange', this.onPointerLockChange);
+    document.removeEventListener('pointerlockerror', this.onPointerLockError);
 
     for (const b of this.bots) b.rig.dispose();
     this.textures.dispose();

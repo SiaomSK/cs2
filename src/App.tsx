@@ -63,6 +63,10 @@ export default function App() {
     };
   }, []);
 
+  useEffect(() => {
+    engineRef.current?.setUiOpen(buyOpen);
+  }, [buyOpen]);
+
   const handleStartMatch = useCallback(() => {
     setBuyOpen(false);
     setScoreboardOpen(false);
@@ -234,7 +238,10 @@ export default function App() {
           hud={hud}
           onBuyWeapon={handleBuyWeapon}
           onBuyArmor={handleBuyArmor}
-          onClose={() => setBuyOpen(false)}
+          onClose={() => {
+            setBuyOpen(false);
+            engineRef.current?.requestPointerLock();
+          }}
         />
       )}
 
