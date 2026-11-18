@@ -1,0 +1,6 @@
+{
+  "name": "CS2: Tactical Web",
+  "description": "Ultra-lightweight browser recreation of Counter-Strike 2 built to run smoothly on even the lowest-spec PCs.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
